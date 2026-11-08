@@ -1,0 +1,55 @@
+{
+  "schema": 2,
+  "days": [
+    {
+      "id": "system-06",
+      "title": "从 Linux 主桥日志回查设备树",
+      "layer": "硬件描述 · FDT 与主桥",
+      "goal": "区分系统接收的硬件描述、主桥绑定和下游枚举，并选出下一条取证命令。",
+      "sections": [
+        {
+          "title": "先找到 Linux 实际收到的描述",
+          "body": "FDT 是扁平设备树，DTB 是它的二进制表示。QEMU 可以生成描述虚拟板卡的 DTB，固件也可能选择或修改实际交给内核的版本。排障时先区分生成文件和运行中内核看到的树。若系统支持，可读取 /sys/firmware/devicetree/base，或使用 dtc 从该目录还原可读描述。把实际运行树和你认为已经修改过的源文件并排，先核对机器型号与相关节点是否一致。"
+        },
+        {
+          "title": "逐级验证主桥",
+          "body": "主桥节点的 compatible 参与驱动匹配。对通用 ECAM 主桥，reg 描述增强配置访问机制所用的配置空间窗口，ranges 描述 PCI 地址窗口与父总线地址之间的映射。读取配置空间可以发现设备功能，而驱动后续使用设备寄存器还依赖资源映射。画两条箭头，一条表示读配置空间发现卡，另一条表示根据资源映射访问卡上的控制寄存器，再用日志验证各箭头。"
+        },
+        {
+          "title": "把可枚举与可驱动分开",
+          "body": "现在假设实际树上有主桥节点，日志也有根总线，但驱动读卡的寄存器时报错。此时可以保留主桥存在和端点可枚举的证据，再查端点资源分配、上游桥窗口和驱动日志。若运行中主桥节点本身缺失，就先回到交接与设备树来源。对同一个问题做两张简短记录，分别写你确认的事实和仍需检查的假设，可以减少跨层猜测。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "system-06-e", "node": "fdt", "section": 0, "kind": "training", "prereq": [],
+          "title": "找实际运行的设备树", "scene": "QEMU 启动时可能有多份 DTB。",
+          "evidence": "候选文件：board.dtb\n运行系统已提供 /sys/firmware/devicetree/base",
+          "q": "先用哪个来源核对运行中的主桥节点？",
+          "options": ["运行系统暴露的设备树", "任意一份同名 DTB", "设备厂商的广告页"], "answer": 0,
+          "hint": "先查内核实际使用的描述。", "why": "运行中的设备树更接近内核当前所见。",
+          "next": "找到主桥的 compatible 和 reg。"
+        },
+        {
+          "id": "system-06-m", "node": "fdt", "section": 1, "kind": "training", "prereq": [],
+          "title": "区分配置和地址窗口", "scene": "你在阅读通用 ECAM 主桥节点。",
+          "evidence": "compatible = pci-host-ecam-generic\nreg\nranges",
+          "q": "哪项描述配置空间窗口？",
+          "options": ["ranges", "reg", "compatible"], "answer": 1,
+          "hint": "配置空间和下游地址窗口各有用途。", "why": "该通用绑定下 reg 描述配置访问窗口。",
+          "next": "另行检查 ranges 的映射与驱动资源。"
+        },
+        {
+          "id": "system-06-h", "node": "pci", "section": 2, "kind": "training", "prereq": [],
+          "title": "端点已出现但寄存器读失败", "scene": "Linux 看到该功能，驱动访问控制寄存器时报错。",
+          "evidence": "lspci 可读设备标识\ndriver: device register read failed",
+          "q": "优先核对哪组证据？",
+          "options": ["只检查启动菜单显示名称", "直接把问题定成没有枚举", "资源分配、上游桥窗口与驱动报错"], "answer": 2,
+          "hint": "先留下已经证实的配置空间访问。", "why": "配置读出和访问设备内存属于不同路径。",
+          "next": "核对端点资源和主桥映射。"
+        }
+      ],
+      "reference": null
+    }
+  ]
+}
