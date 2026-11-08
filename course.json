@@ -22,34 +22,157 @@
       ],
       "questions": [
         {
-          "id": "system-06-e", "node": "fdt", "section": 0, "kind": "training", "prereq": [],
-          "title": "找实际运行的设备树", "scene": "QEMU 启动时可能有多份 DTB。",
+          "id": "system-06-e",
+          "node": "fdt",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "找实际运行的设备树",
+          "scene": "QEMU 启动时可能有多份 DTB。",
           "evidence": "候选文件：board.dtb\n运行系统已提供 /sys/firmware/devicetree/base",
           "q": "先用哪个来源核对运行中的主桥节点？",
-          "options": ["运行系统暴露的设备树", "任意一份同名 DTB", "设备厂商的广告页"], "answer": 0,
-          "hint": "先查内核实际使用的描述。", "why": "运行中的设备树更接近内核当前所见。",
+          "options": [
+            "运行系统暴露的设备树",
+            "任意一份同名 DTB",
+            "设备厂商的广告页"
+          ],
+          "answer": 0,
+          "hint": "先查内核实际使用的描述。",
+          "why": "运行中的设备树更接近内核当前所见。",
           "next": "找到主桥的 compatible 和 reg。"
         },
         {
-          "id": "system-06-m", "node": "fdt", "section": 1, "kind": "training", "prereq": [],
-          "title": "区分配置和地址窗口", "scene": "你在阅读通用 ECAM 主桥节点。",
+          "id": "system-06-m",
+          "node": "fdt",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "区分配置和地址窗口",
+          "scene": "你在阅读通用 ECAM 主桥节点。",
           "evidence": "compatible = pci-host-ecam-generic\nreg\nranges",
           "q": "哪项描述配置空间窗口？",
-          "options": ["ranges", "reg", "compatible"], "answer": 1,
-          "hint": "配置空间和下游地址窗口各有用途。", "why": "该通用绑定下 reg 描述配置访问窗口。",
+          "options": [
+            "ranges",
+            "reg",
+            "compatible"
+          ],
+          "answer": 1,
+          "hint": "配置空间和下游地址窗口各有用途。",
+          "why": "该通用绑定下 reg 描述配置访问窗口。",
           "next": "另行检查 ranges 的映射与驱动资源。"
         },
         {
-          "id": "system-06-h", "node": "pci", "section": 2, "kind": "training", "prereq": [],
-          "title": "端点已出现但寄存器读失败", "scene": "Linux 看到该功能，驱动访问控制寄存器时报错。",
+          "id": "system-06-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "端点已出现但寄存器读失败",
+          "scene": "Linux 看到该功能，驱动访问控制寄存器时报错。",
           "evidence": "lspci 可读设备标识\ndriver: device register read failed",
           "q": "优先核对哪组证据？",
-          "options": ["只检查启动菜单显示名称", "直接把问题定成没有枚举", "资源分配、上游桥窗口与驱动报错"], "answer": 2,
-          "hint": "先留下已经证实的配置空间访问。", "why": "配置读出和访问设备内存属于不同路径。",
+          "options": [
+            "只检查启动菜单显示名称",
+            "直接把问题定成没有枚举",
+            "资源分配、上游桥窗口与驱动报错"
+          ],
+          "answer": 2,
+          "hint": "先留下已经证实的配置空间访问。",
+          "why": "配置读出和访问设备内存属于不同路径。",
           "next": "核对端点资源和主桥映射。"
         }
       ],
       "reference": null
+    },
+    {
+      "id": "system-07",
+      "title": "PCIe 卡能枚举，为什么 BAR 分不到地址",
+      "layer": "资源分配 · PCIe BAR 与桥窗口",
+      "goal": "从配置空间、主桥资源和上游桥窗口逐步定位设备初始化失败。",
+      "sections": [
+        {
+          "title": "同一张卡有两条访问路径",
+          "body": "你在 QEMU virt 里执行 lspci -tv，看到一张 NVMe 控制器挂在根端口下，但 Linux 没出现磁盘。先把能看到 PCI 功能记为已确认。内核用配置空间读厂商号、设备号，也能发现 BAR。BAR 是基址寄存器，用来描述设备需要的寄存器或内存地址范围。CPU 想访问设备的控制寄存器时，通常需要通过分配好的 MMIO 地址，也就是把设备寄存器映射到内存地址空间。配置空间能读出，说明枚举走通了一段。你还要确认承载设备控制寄存器的地址范围已经分配，驱动才有机会访问它。"
+        },
+        {
+          "title": "从主桥一路查到端点",
+          "body": "在使用设备树的 RISC‑V Linux 上，通用 PCI 主桥节点的 reg 可描述配置空间窗口，ranges 描述 PCI 总线资源到父总线地址的映射。若启动路线经过 UEFI，固件可能已经为 PCI 资源建立过分配，Linux 仍要根据平台描述和自己的资源策略接管。看实机时，先用 lspci -tv 找到端点及其上游桥，再用 lspci -vv -s 分别查看设备的 Region 和桥转发的内存窗口。Linux 还在设备对应的 sysfs 目录下提供 resource 文本，给出主机视角下的资源地址。别直接拿设备树上的 PCI 总线地址与 resource 里的主机地址做数值比较。先确认地址属于哪一侧，再按平台映射对齐。"
+        },
+        {
+          "title": "推演一次分配失败",
+          "body": "假设启动日志先列出控制器的设备号，随后出现 BAR 0: no space for，再出现驱动初始化失败。你的第一条排障结论可以写成「PCI 功能已枚举，相关 BAR 分配失败」。接下来核对 BAR 要求的大小、对齐和资源类型，再看上游桥与主桥窗口是否能容纳这一类资源。窗口总量看似足够时，还要区分可用连续区间、已有占用，以及预取和不可预取等资源类型。把端点需求、上游桥窗口和主桥资源各抄一行。试着说明哪一行能证实瓶颈，哪一行只是下一步要验证的假设。资源成功分配后，再看驱动是否能初始化控制器与探测命名空间。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "system-07-e",
+          "node": "pci",
+          "kind": "training",
+          "title": "lspci 看到了什么",
+          "scene": "设备号已显示，驱动尚无初始化结果。",
+          "evidence": "lspci -nn: Non-Volatile memory controller [0108]",
+          "q": "这条证据直接支持哪个结论？",
+          "options": [
+            "控制器已经创建命名空间",
+            "Linux 已发现该 PCI 功能",
+            "对应的 MMIO 地址已能读写"
+          ],
+          "answer": 1,
+          "hint": "这行来自 PCI 枚举。",
+          "why": "配置空间识别了 PCI 功能。资源分配与驱动访问要另外确认。",
+          "next": "检查 BAR 分配日志和资源表。",
+          "prereq": [],
+          "section": 0,
+          "level": 0
+        },
+        {
+          "id": "system-07-m",
+          "node": "fdt",
+          "kind": "training",
+          "title": "先弄清两边的地址空间",
+          "scene": "你正在比对通用主桥设备树和 Linux 的资源表。",
+          "evidence": "PCI 总线地址与 sysfs resource 的主机地址数值不同",
+          "q": "你先用哪项描述解释差值？",
+          "options": [
+            "主桥 ranges 的父子总线映射",
+            "主桥 reg 的配置窗口起点",
+            "端点 PCI class 的编码规则"
+          ],
+          "answer": 0,
+          "hint": "先确认资源地址在主机一侧还是 PCI 总线一侧。",
+          "why": "通用主桥的 ranges 描述 PCI 到父总线的资源映射。",
+          "next": "把区间转换到同一侧，再判断是否落在可用窗口中。",
+          "prereq": [],
+          "section": 1,
+          "level": 1
+        },
+        {
+          "id": "system-07-h",
+          "node": "pci",
+          "kind": "training",
+          "title": "资源不足先核对哪一层",
+          "scene": "控制器身份能读出来，启动时驱动报告初始化失败。",
+          "evidence": "BAR 0: no space for [mem size 0x00200000]\nBAR 0: failed to assign",
+          "q": "哪组检查最能直接解释当前失败？",
+          "options": [
+            "只比较端点与上游口的当前链路速率和宽度",
+            "只检查 NVMe 管理队列和命名空间列表",
+            "对照 BAR 的大小、对齐和类型，检查上游桥与主桥的可用窗口"
+          ],
+          "answer": 2,
+          "hint": "先找日志中最早一项已经证实的失败。",
+          "why": "资源分配失败已明确出现。桥窗口大小、类型、连续性和资源占用都可能阻止分配。",
+          "next": "记下端点 BDF，向上逐级核对每段窗口及分配日志。",
+          "prereq": [],
+          "section": 2,
+          "level": 2
+        }
+      ],
+      "reference": {
+        "title": "Linux 内核文档 · 通过 sysfs 查看 PCI 资源",
+        "body": "重点区分 config、resource 和 resource0。排障时可先只读 resource 文本，核对内核记录的主机地址。",
+        "url": "https://docs.kernel.org/PCI/sysfs-pci.html"
+      }
     }
   ]
 }
