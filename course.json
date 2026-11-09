@@ -173,6 +173,193 @@
         "body": "重点区分 config、resource 和 resource0。排障时可先只读 resource 文本，核对内核记录的主机地址。",
         "url": "https://docs.kernel.org/PCI/sysfs-pci.html"
       }
+    },
+    {
+      "id": "system-08",
+      "title": "UEFI 能读盘，Linux 为什么找不到根盘",
+      "layer": "跨层排障 · initramfs 与存储驱动",
+      "goal": "用安装器、固件和正式启动各自的证据，定位根盘在哪个阶段消失。",
+      "sections": [
+        {
+          "title": "先分清哪套环境看到了盘",
+          "body": "固件的 UEFI Shell 能用自己的驱动访问文件系统，安装器也可能用它自带的 Linux 内核和驱动发现同一块盘。安装后的第一次启动，Bootloader 加载的是目标系统的内核和 initramfs。initramfs 是解包到内存中的早期根文件系统，常包含寻找正式根盘所需的工具和模块。进入 dracut emergency shell 说明 Linux 已执行到早期用户态。此时按顺序确认内核有没有枚举控制器、绑定驱动、生成块设备，再查根分区标识。"
+        },
+        {
+          "title": "用三条证据切开驱动与分区",
+          "body": "假设安装器能看到 RAID 逻辑盘，正式启动却提示找不到 root=UUID 对应的设备。先记下本次内核版本和 root= 参数。若救援环境有 lspci，用 lspci -nnk 查该 PCI 功能及 Kernel driver in use。工具不足时，检查对应 PCI 设备在 sysfs 中是否有 driver 链接。功能存在却未绑定时，先查模块缺失、版本不符和探测日志。已有块设备时，再用 lsblk 或 blkid 核对目标 UUID。区分缺整个盘、缺分区，以及盘和分区都在但 UUID 填错。"
+        },
+        {
+          "title": "做一次受控对照",
+          "body": "在使用 dracut 的系统上，确认目标启动项实际选用的内核与 initramfs，再用 lsinitrd 检查那份镜像里的驱动和依赖。若相同内核在救援环境手动加载匹配模块后，逻辑盘与目标 UUID 同时出现，优先追早期驱动路径。修复后用同一启动项再验证，记录控制器 BDF、驱动名、块设备和根分区 UUID。加练时把安装器和正式启动各写一列，标出两边第一个不同的证据。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "system-08-e",
+          "node": "block",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "判断已走到哪一层",
+          "scene": "机器进入 dracut emergency shell。",
+          "evidence": "Linux version ...\ndracut: Warning: /dev/disk/by-uuid/... does not exist",
+          "q": "目前最稳妥的判断是什么？",
+          "options": [
+            "UEFI 仍在选择 Boot#### 条目",
+            "Linux 已进入早期用户态，尚未找到目标根设备",
+            "目标分区 UUID 一定填错了"
+          ],
+          "answer": 1,
+          "hint": "先识别日志由哪一层产生。",
+          "why": "dracut 在 Linux 早期用户态工作。根设备缺失还需区分驱动、块设备和标识。",
+          "next": "在当前环境检查 PCI 功能、驱动绑定和块设备。"
+        },
+        {
+          "id": "system-08-m",
+          "node": "block",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "找第一个缺失的证据",
+          "scene": "安装器里有 RAID 逻辑盘，正式启动卡在挂载根分区。",
+          "evidence": "正式启动的 lspci 显示 RAID 控制器\n该设备没有 driver 链接\nlsblk 只显示 USB 救援盘",
+          "q": "现在优先做哪项对照？",
+          "options": [
+            "对照安装器与目标 initramfs 中的控制器驱动、版本和探测日志",
+            "把 root=UUID 改成安装器当时的 /dev/sda2",
+            "检查固件是否保存了当前 EFI 启动项"
+          ],
+          "answer": 0,
+          "hint": "控制器已经枚举，目标块设备尚未出现。",
+          "why": "当前证据首先在驱动绑定处中断。根设备参数要等目标块设备出现后再核对。",
+          "next": "定位实际启动项对应的内核和 initramfs，再查看其中的驱动。"
+        },
+        {
+          "id": "system-08-h",
+          "node": "block",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "根据对照结果选修复方向",
+          "scene": "在相同内核版本的救援环境中做一次受控试验。",
+          "evidence": "失败时 PCI 功能存在，但无驱动、无目标盘\n手动加载匹配模块后出现目标盘，blkid 显示 UUID 与 root= 一致\nlsinitrd 检查实际启动镜像，未找到该模块",
+          "q": "哪一步最直接检验你的根因判断？",
+          "options": [
+            "改写同一个 UUID，再清空 UEFI 启动顺序",
+            "提高 PCIe 链路目标代际后直接重启",
+            "把匹配模块及依赖纳入目标 initramfs，确认启动项选中它，再用同一根参数复测"
+          ],
+          "answer": 2,
+          "hint": "找出试验中改变的有效变量。",
+          "why": "手动加载使块设备和原 UUID 同时恢复，且镜像缺模块。对同一路线复测可验证早期驱动假设。",
+          "next": "保留修复前后的 lsinitrd、驱动绑定和根设备出现记录。"
+        }
+      ],
+      "reference": {
+        "title": "鲲鹏实案 · RAID 驱动未进入目标 initramfs",
+        "body": "官方案例记录了安装成功、重启后无法找到系统盘的场景。对照安装器与目标系统差异。此案例来自鲲鹏平台，适合迁移取证方法。",
+        "url": "https://www.hikunpeng.com/developer/techArticles/20260630-2"
+      }
+    },
+    {
+      "id": "system-09",
+      "title": "PCIe 能枚举，怎样验收速率和带宽",
+      "layer": "性能验收 · 协商速率、宽度与吞吐",
+      "goal": "区分标称能力、实际链路和应用吞吐，指出哪一跳限制了测量结果。",
+      "sections": [
+        {
+          "title": "枚举之后再看两组链路字段",
+          "body": "lspci -tv 能说明设备出现在拓扑的哪一支。要核对速率和宽度，再对端点及其相连的上游端口执行 lspci -vv -s <BDF>。LnkCap 描述设备宣告的最大链路能力，LnkSta 描述当前协商结果。端点和它直接相连的对端看到同一条链路。若路径有 PCIe switch，继续看它的上行链路，每一跳单独记录。端点支持 Gen4 ×4，仍需核对主板插槽、转接板和上游路径能提供的速率与宽度。"
+        },
+        {
+          "title": "算单方向编码后上限",
+          "body": "Gen3 和 Gen4 分别是每通道 8、16 GT/s，都用 128b/130b 编码。估算单方向编码后上限，用每通道 GT/s 乘当前通道数，再乘 128/130，最后除以 8 转成十进制 GB/s。Gen3 ×2 约 1.97 GB/s，Gen4 ×4 约 7.88 GB/s。此值还没扣事务包与协议开销。验收另外测实际应用吞吐，记录读写方向、块大小、队列深度、测量范围和缓存条件，再对比项目目标。"
+        },
+        {
+          "title": "用一次复测区分链路与应用问题",
+          "body": "假设端点本地链路是 Gen4 ×4，经过 switch 的上游链路却只有 Gen3 ×2，盘的顺序读为 1.6 GB/s。更窄的上行链路先成为可检查的上限，实测仍受盘、驱动和负载影响。先记录该段两端 LnkSta、插槽布线或上游端口配置及错误日志。对照时只改一个变量，例如换到经确认支持预期代际与宽度的上游路径，保持盘、软件和负载一致。若链路已达标而吞吐仍低，再查设备限制与测量方法。加练时列出每一跳的当前速率和宽度，指出你会先验证哪一跳。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "system-09-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "从输出读出实际链路",
+          "scene": "同一个端点给出两组链路信息。",
+          "evidence": "LnkCap: Speed 16GT/s, Width x4\nLnkSta: Speed 8GT/s, Width x2",
+          "q": "这次链路当前协商到哪一档？",
+          "options": [
+            "Gen3 ×2",
+            "Gen4 ×4",
+            "Gen3 ×4"
+          ],
+          "answer": 0,
+          "hint": "先区分 Cap 和 Sta。",
+          "why": "当前结果取 LnkSta 的 8 GT/s 和 x2。",
+          "next": "核对直接相连的上游端口。"
+        },
+        {
+          "id": "system-09-m",
+          "node": "pci",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "计算当前链路单方向上限",
+          "scene": "实际是 Gen3 ×2，采用 128b/130b 编码。",
+          "evidence": "当前每通道 8 GT/s，两条通道",
+          "q": "按十进制 GB/s，扣编码开销后的单方向上限约多少？",
+          "options": [
+            "3.94 GB/s",
+            "1.97 GB/s",
+            "7.88 GB/s"
+          ],
+          "answer": 1,
+          "hint": "先乘两条通道，再乘 128/130，最后从 bit 换算成 byte。",
+          "why": "8 × 2 × 128/130 ÷ 8 约等于 1.97 GB/s，尚未扣事务开销。",
+          "next": "记录实际负载参数，再和实测吞吐比较。"
+        },
+        {
+          "id": "system-09-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "定位拓扑中的限制段",
+          "scene": "NVMe 经过 PCIe switch 接入，项目要求复核整条主机路径。",
+          "evidence": "端点到 switch 下游口是 Gen4 ×4\nswitch 上行口到根端口是 Gen3 ×2\n单盘顺序读实测 1.6 GB/s",
+          "q": "接下来哪项验证最有区分度？",
+          "options": [
+            "只比较两张盘的峰值规格，先换掉当前 NVMe",
+            "把端点的 Gen4 ×4 作为整条路径的验收结果",
+            "记录上行口和根端口的协商状态，并在匹配的上游路径上保持同一负载做对照"
+          ],
+          "answer": 2,
+          "hint": "端点到 switch 之间只占整条路径的一跳。",
+          "why": "上行链路上限更低。保持设备和负载相同、只改变上游路径，有助于验证链路是否是瓶颈。",
+          "next": "验收分别记录协商目标、逐跳实际状态和同条件实测。"
+        }
+      ],
+      "reference": {
+        "title": "Linux PCI 支持库 · 查询路径可用带宽",
+        "body": "查找 pcie_bandwidth_available()。该接口沿 PCI 设备链向上查找最低带宽段及对应设备，可用于理解端点能力与整条路径限制。",
+        "url": "https://docs.kernel.org/driver-api/pci/pci.html"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "kunpeng-raid-initramfs",
+      "source": "华为鲲鹏",
+      "scope": "跨架构参考",
+      "status": "有修复",
+      "checked": "2026-11-09",
+      "title": "安装器能见 RAID 盘，重启却找不到系统盘",
+      "body": "安装时已加载新版 RAID 驱动，目标系统的早期启动镜像却仍包含旧版。比对安装器、目标内核和实际启动的 initramfs，才定位到打包环节。",
+      "next": "在你的目标系统上核对内核和 initramfs 的版本、模块与依赖，记录修复前后驱动绑定和目标块设备。使用符合项目签名策略的模块。",
+      "url": "https://www.hikunpeng.com/developer/techArticles/20260630-2"
     }
   ]
 }
