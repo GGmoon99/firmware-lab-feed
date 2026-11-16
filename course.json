@@ -347,6 +347,734 @@
         "body": "查找 pcie_bandwidth_available()。该接口沿 PCI 设备链向上查找最低带宽段及对应设备，可用于理解端点能力与整条路径限制。",
         "url": "https://docs.kernel.org/driver-api/pci/pci.html"
       }
+    },
+    {
+      "id": "pcie-w47-01",
+      "title": "设备树复测：配置窗口和设备窗口",
+      "layer": "RISC-V · 设备树 · Linux 主桥",
+      "goal": "从一次成功的配置读和一次失败的寄存器访问，分别追到主桥属性，并手算一遍地址。",
+      "sections": [
+        {
+          "title": "先分清谁发起了哪种访问",
+          "body": "工作台上同时有两个现象：Linux 能列出 NVMe 的 Vendor ID，驱动却访问不了控制器寄存器。固件提供平台描述，Linux 的主桥驱动根据它建立访问路径。先问日志中的地址指向哪里。PCI 配置空间是每个功能的身份和能力目录，读到厂商号相当于已经走通这个功能的配置访问。对 pci-host-ecam-generic 绑定，reg 描述供主桥使用的配置窗口，ECAM 按总线、设备、功能和寄存器偏移选中位置。板子上的专用主桥可能有不同的 reg 布局，先核对 compatible 对应的绑定。"
+        },
+        {
+          "title": "用数字做一次地址翻译",
+          "body": "给一条简化的 ranges：PCI 侧起点 0x40000000，CPU 侧起点 0x90000000，长度 0x01000000。端点 BAR 的总线地址是 0x40002000，它在窗口内偏移 0x2000，因此主机所见地址应是 0x90002000。BAR 是端点的基址寄存器，给出端点资源位于 PCI 地址空间的哪里。拿到 lspci、设备树与 sysfs 地址时标清视角，Linux sysfs 的 resource 给的是主机资源地址。再检查映射后的整个区间是否落在窗口内，只有起点落进去仍可能越界。"
+        },
+        {
+          "title": "改错属性会看到什么",
+          "body": "做一个反事实推演：假如换了最新 DTB，日志还是显示旧窗口。此时先从运行中的 /sys/firmware/devicetree/base 核对实际主桥属性，再回查 U-Boot 或其他固件选的是哪份 DTB。假如运行树确实更新，而且端点身份仍能读出，先保留配置路径已走通的证据，再查 ranges、上游桥窗口和 BAR。把方向倒过来：主桥驱动绑定了，目标 BDF 的配置读始终返回全一。此时需要确认链路、总线号和配置窗口覆盖，单独扩大内存窗口不能解释目标配置读失败。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "暂停约一分钟，写三行：配置访问为何成立、CPU 到 BAR 的地址怎么算、如果运行树仍为旧版该回查谁。再换一个端点，把 BAR 总线地址设为 0x40fff000，大小设为 0x2000，验算资源尾地址。窗口到 0x40ffffff 结束，这个 BAR 的起点有效，尾部越界。以后遇到「地址看起来在窗口里」的报告，要求它同时给出大小和结束地址。\n\n进实验环境后，先留一份原始主桥描述和 Linux 启动日志，再只变更一个输入。修改前后取同一个域、同一个端点和同一个 BAR 号。例如改成更大窗口后若端点配置读仍失败，先检查是否改变了配置窗口的覆盖，或者根本没启动你准备的镜像。离线复盘时保留这些对照，能让同事从你的证据继续排查。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-01-e",
+          "node": "fdt",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "认出配置窗口",
+          "scene": "通用 ECAM 主桥要读端点身份。",
+          "evidence": "compatible = pci-host-ecam-generic\nreg 与 ranges 都存在",
+          "q": "先核对哪项定义配置访问窗口？",
+          "options": [
+            "ranges",
+            "reg",
+            "端点 namespace"
+          ],
+          "answer": 1,
+          "hint": "先想内核正在访问配置空间还是设备寄存器。",
+          "why": "在此通用绑定中，reg 描述 ECAM 配置窗口。",
+          "next": "随后核对目标总线号是否在主桥覆盖范围内。"
+        },
+        {
+          "id": "pcie-w47-01-m",
+          "node": "fdt",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "手算主机资源地址",
+          "scene": "一张端点的 BAR 位于已知 PCI 窗口。",
+          "evidence": "PCI 起点 0x40000000，CPU 起点 0x90000000\nBAR 总线地址 0x40002000",
+          "q": "忽略其余桥限制，BAR 对应的主机起始地址？",
+          "options": [
+            "0x40002000",
+            "0x90000000",
+            "0x90002000"
+          ],
+          "answer": 2,
+          "hint": "先求它在 PCI 窗口内的偏移。",
+          "why": "偏移为 0x2000，应用到主机窗口起点。",
+          "next": "再拿 sysfs resource 检查这一段的起止地址。"
+        },
+        {
+          "id": "pcie-w47-01-h",
+          "node": "fdt",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "定位没生效的改动",
+          "scene": "你改了候选 DTB，重启后 BAR 故障不变。",
+          "evidence": "目标设备 Vendor ID 可读\n运行时仍报告旧的内存窗口",
+          "q": "下一组证据优先选什么？",
+          "options": [
+            "确认运行设备树的 ranges 并回查固件选用的 DTB",
+            "直接改设备驱动的厂商号表",
+            "立刻修改 `reg` 增大 ECAM"
+          ],
+          "answer": 0,
+          "hint": "设备身份已可读取，先查改动有没有进入运行系统。",
+          "why": "若运行树未变化，需要查 DTB 来源。如果运行树已变化，再比较实际资源与窗口。",
+          "next": "核对节点路径、节点属性、固件选择和内核现场四项证据。"
+        }
+      ],
+      "reference": {
+        "title": "Linux 通用 PCI 主桥的设备树绑定",
+        "body": "对照 binding 中的 reg、bus-range 和 ranges。真机先按自己的 compatible 确认走的绑定。",
+        "url": "https://raw.githubusercontent.com/torvalds/linux/master/Documentation/devicetree/bindings/pci/host-generic-pci.yaml"
+      }
+    },
+    {
+      "id": "pcie-w47-02",
+      "title": "开机后确认走的是设备树还是 ACPI",
+      "layer": "平台交接 · UEFI · Linux",
+      "goal": "把固件启动路径与 OS 接收的硬件描述分开，找出主桥地址究竟应回查哪份输入。",
+      "sections": [
+        {
+          "title": "把交接拆成两件事",
+          "body": "从 RISC-V 的启动链回顾：OpenSBI 启动 S 模式下一阶段，下一阶段可能是 U-Boot、UEFI 固件或内核。这里讨论 Linux 支持的两类平台描述。设备树常用于 QEMU virt 和嵌入式板，服务器级平台也可能通过 UEFI 提供 ACPI。UEFI 负责加载程序和交接服务，ACPI 或设备树提供硬件描述。只知道用了 GRUB 或看见了 UEFI 菜单，还无法确定 Linux 使用哪条描述路径。例子中的选择取决于架构、内核配置、启动参数和平台支持。"
+        },
+        {
+          "title": "对准当前内核实际看到的东西",
+          "body": "在 Linux 环境里记录 dmesg 中与 ACPI、OF 和 PCI host bridge 有关的启动日志。支持的系统也可检查 /sys/firmware/acpi/tables 与 /sys/firmware/devicetree/base。这些目录能提供入口，两个目录同时存在时，仍应从目标主桥的日志、设备来源和驱动匹配信息判断。走设备树时查目标节点的 compatible、reg 和 ranges。走 ACPI 时，MCFG 给出 PCI 配置空间所需的信息，根桥的 _CRS 描述当前资源。先用域、总线范围和根桥身份对齐同一个对象。"
+        },
+        {
+          "title": "把故障带回正确的交接输入",
+          "body": "假设同一台板子有 A、B 两条启动路线。A 的日志显示 OF 匹配了通用主桥，B 的日志显示 ACPI 报告根桥但分配窗口偏小。按同一 OS 镜像记录两条路线的固件版本、启动参数和主桥信息。对 B 查 ACPI 根桥资源和对应段的配置窗口，并确认内核是否应用了平台特例。只看到 MCFG 还不能说明端点 BAR 有空间。将 A、B 的主桥标识和PCI 拓扑并排后，再决定在哪里修描述。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "画两列，左列是固件加载了谁，右列是 Linux 解析了什么。先在左列填 OpenSBI、UEFI、内核启动三个观察，再在右列填一条根桥绑定证据。一旦进入 ACPI 分支，把 MCFG 和 _CRS 写成两行，分别注明它们服务于哪一种访问。最后用一句话解释为什么「用了 GRUB」不够选出下一份待看的硬件描述。\n\n现场记录时明确区分固件镜像名和操作系统分发版本。相同发行版安装在两台设备上也可以走两条不同的描述路径。反过来，即使两次都走 ACPI，同一个根桥在固件升级前后仍可能得到不同的资源范围。只有把目标桥与输入文件或表对应起来，差异才足以指导下一次修改。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-02-e",
+          "node": "uefi-boot",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "理解 UEFI 输出的边界",
+          "scene": "屏幕显示 UEFI 启动菜单。",
+          "evidence": "菜单里有 Linux 启动项\n尚无内核枚举日志",
+          "q": "此时能确定哪件事？",
+          "options": [
+            "Linux 必定用 DT",
+            "Linux 已成功扫描 PCI",
+            "固件菜单已运行"
+          ],
+          "answer": 2,
+          "hint": "当前证据来自固件。",
+          "why": "菜单证明固件到了启动管理界面。",
+          "next": "进系统抓与目标主桥相关的日志。"
+        },
+        {
+          "id": "pcie-w47-02-m",
+          "node": "fdt",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "选择 ACPI 取证入口",
+          "scene": "系统日志已确认目标根桥走 ACPI。",
+          "evidence": "MCFG 有对应段\nBAR 分配报空间不足",
+          "q": "哪一项更直接描述根桥可用资源？",
+          "options": [
+            "MCFG 的配置访问地址",
+            "根桥 _CRS",
+            "EFI 文件系统目录"
+          ],
+          "answer": 1,
+          "hint": "现在缺的是主桥的资源窗口信息。",
+          "why": "MCFG 用于配置访问，根桥资源优先看 _CRS 和内核实际采纳的范围。",
+          "next": "对照 Linux resource 及同一段的根桥日志。"
+        },
+        {
+          "id": "pcie-w47-02-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "对齐两个启动路径",
+          "scene": "A 从 OF 匹配主桥，B 从 ACPI 枚举主桥。",
+          "evidence": "两次同一块端点\n不同的 PCI 根资源窗口",
+          "q": "怎样把差异回查到固件描述？",
+          "options": [
+            "对比两份任意 DTB",
+            "只对比启动菜单顺序",
+            "记录同一域、根桥和设备路径，核对各自输入及内核采纳窗口"
+          ],
+          "answer": 2,
+          "hint": "先确保是在比较同一个设备的上游根桥。",
+          "why": "两条路径应按实际生效的描述和根桥对应，才能做有效的差异定位。",
+          "next": "保存两次的域、根总线、控制器和资源范围。"
+        }
+      ],
+      "reference": {
+        "title": "Linux 内核的 RISC-V 启动要求",
+        "body": "读固件交接要求和 UEFI 相关段落。确定实机的启动方式后，再回到该路径的主桥描述。",
+        "url": "https://docs.kernel.org/arch/riscv/boot.html"
+      }
+    },
+    {
+      "id": "pcie-w47-03",
+      "title": "从 BAR 成功分配走到驱动 probe",
+      "layer": "Linux · PCI 枚举 · 驱动绑定",
+      "goal": "分别写出枚举成功、资源可用、驱动匹配和驱动初始化的现场证据。",
+      "sections": [
+        {
+          "title": "先定位 PCI 功能，再看谁接手",
+          "body": "从 lspci -Dtv 找设备和上游桥。从 lspci -Dnnk -s <BDF> 抄设备标识和 Kernel driver in use，另外看列出的候选模块。Linux 发现设备后会按标识和驱动表等规则匹配，匹配到驱动才会进入其 probe 初始化。候选模块名字只是匹配线索，已绑定的驱动通常可用 /sys/bus/pci/devices/<BDF>/driver 的链接核对。服务器更换插槽或固件版本后 BDF 可能变化，按拓扑、设备 ID 和槽位核对。"
+        },
+        {
+          "title": "probe 的第一批边界",
+          "body": "以存储控制器为例，进入 probe 后通常会启用 PCI 功能、请求并映射 MMIO 资源、设置 DMA 地址掩码，再配置队列与中断。具体顺序看驱动实现。lspci -vv 的 Region 和 sysfs resource 能帮助确认 BAR 已分配；驱动自己的错误才更接近它失败在哪一步。probe 可能开始执行后返回失败，最终没有 driver 链接。也可能先失败，后续重试成功。按时间和 BDF 对齐日志，避免把一条旧的失败行套给当前状态。"
+        },
+        {
+          "title": "用两组相似日志做反证",
+          "body": "第一条日志有 Vendor ID、有 Region、没有驱动日志。下一步先查可匹配的模块、内核配置和当前该功能绑定给了谁。例如虚拟化环境里可能绑定了 vfio-pci。第二条有驱动名加该 BDF 的初始化失败日志，已经说明 probe 至少执行过。若它在映射资源时报错，才回查资源范围和请求结果；若它已经做到设置队列，再往 DMA、中断和控制器状态查。最后写四列小表：设备身份、资源、绑定、对象。每列只填可观察的字段。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "拿两分钟在纸上写出四个最小输出。第一行给 BDF 和设备标识，第二行给 BAR 区间，第三行给当前驱动，第四行给可用的块设备。假设第三行留空，写两个互相排斥的解释及各自需要的证据。比如根本没有匹配与 probe 返回失败，前者可去看模块和设备别名，后者应核对时间相符的驱动日志。\n\n看源码时可以从对应驱动的 ID 表向下追，找到注册结构里的 probe，然后标出每条早退分支。用已采到的错误字符串做一次全文搜索，可快速把运行证据指到具体的调用处。若同一字符串出现多次，再用内核版本、调用栈或相邻日志定位。这样能把下班后需要继续看的一整套驱动缩小到一段明确代码。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-03-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "查当前驱动",
+          "scene": "候选模块与当前绑定结果可能不同。",
+          "evidence": "lspci -nnk 有 Kernel modules\nsysfs 能检查 driver 链接",
+          "q": "哪条最直接证明当前绑定？",
+          "options": [
+            "同一 BDF 的 sysfs driver 链接",
+            "出现厂商标识",
+            "Kernel modules 列出 nvme"
+          ],
+          "answer": 0,
+          "hint": "区分模块候选和设备绑定。",
+          "why": "driver 链接直接指向设备当前绑定的驱动。",
+          "next": "再核对是否是预期驱动。"
+        },
+        {
+          "id": "pcie-w47-03-m",
+          "node": "pci",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "识别 probe 已经运行",
+          "scene": "目标设备身份和 BAR 均可读。",
+          "evidence": "驱动日志：同一 BDF，failed to map BAR\n当前无 driver 链接",
+          "q": "这组证据最支持哪步？",
+          "options": [
+            "设备还没有被枚举",
+            "控制器已经暴露块设备",
+            "驱动 probe 曾运行并报告映射失败"
+          ],
+          "answer": 2,
+          "hint": "看失败日志由谁打印。",
+          "why": "带目标 BDF 的驱动错误证明它进入过初始化代码。",
+          "next": "检查 Region、resource 和该驱动的映射调用。"
+        },
+        {
+          "id": "pcie-w47-03-h",
+          "node": "block",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "确认驱动与对象的分界",
+          "scene": "某控制器已绑定预期驱动。",
+          "evidence": "有 driver 链接\nlsblk 没目标磁盘\n当前日志无 BAR 分配错误",
+          "q": "下一步定位哪一层？",
+          "options": [
+            "重建 UEFI 启动项",
+            "核对控制器初始化和 namespace 或逻辑卷对象",
+            "从 ECAM 地址开始全面重查"
+          ],
+          "answer": 1,
+          "hint": "把现有绑定证据留住。",
+          "why": "从控制器到可用块设备还要经过协议和对象探测。",
+          "next": "按实际设备类型选 nvme list-ns 或 lsscsi 等接口。"
+        }
+      ],
+      "reference": {
+        "title": "Linux PCI 驱动文档",
+        "body": "看 probe 回调、资源管理、DMA 和 IRQ，写出正在读的驱动的实际初始化顺序。",
+        "url": "https://docs.kernel.org/PCI/pci.html"
+      }
+    },
+    {
+      "id": "pcie-w47-04",
+      "title": "队列提交以后：DMA 与 MSI 的证据",
+      "layer": "Linux · DMA · MSI",
+      "goal": "把 CPU 寄存器访问、设备访问内存和完成中断拆成三条路径。",
+      "sections": [
+        {
+          "title": "沿一次命令走三段",
+          "body": "Linux 驱动把命令写到内存队列，通知设备时常要写 MMIO 门铃。设备随后用 DMA 读写内存，完成时可能用 MSI 或 MSI-X 通知 CPU。一个写门铃成功的观察只能证明寄存器访问那段走通。DMA 使用驱动通过 DMA API 获得的可用地址，平台可经过 IOMMU 地址翻译。PCI 配置访问、CPU 可见的 BAR 地址和设备可用的 DMA 地址，各自描述不同视角。你可以画成三条箭头，给每条箭头标上发起者和接收者。"
+        },
+        {
+          "title": "从计数和错误判断先查哪边",
+          "body": "先用 lspci -vv 看能力片段和使能状态，再查对应 BDF 下是否分配了 msi_irqs，并按具体 IRQ 对照 /proc/interrupts 的差值。读空闲时一张快照说不出太多。发起一笔已知会走目标队列的测试请求，记录前后计数，同时查内核日志有无 IOMMU fault、DMA 映射失败或队列错误。驱动可能使用轮询或中断合并，单个 IRQ 不增长只能结合驱动模式和负载解释。"
+        },
+        {
+          "title": "超时不是总指向中断",
+          "body": "例一是门铃写成功、DMA 日志立即报该设备访问未映射地址。先查 DMA 的映射对象、地址和设备所属域，再看中断。例二是通过驱动可观察信息确认完成队列已经更新、同一向量计数却无增量，且测试明确是中断模式。这才更值得查 IRQ 请求、向量配置和平台中断路线。用这些证据说明为什么你优先查一个分支，同时留一个能够推翻当前假设的检查。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "画 CPU、设备、内存三个框。在 CPU 到设备的箭头旁写 MMIO 门铃，在设备与内存之间写 DMA。然后补上设备如何以 MSI 通知系统。圈出最能区分「命令未完成」和「完成但通知未处理」的一条证据。只观察到超时的话，先保留两种可能，再选一条不修改设备配置的检查。\n\n写问题单时同时记设备、向量和队列。设备相同但队列不同，可能没有使用你监视的中断号。设备枚举多次后 IRQ 号也可能变化，不能一直用上一次启动的编号。遇到 IOMMU 错误，把触发请求和日志时间对齐，能够减少把背景设备的故障套在当前控制器上的误判。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-04-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "区分门铃与 DMA",
+          "scene": "驱动的调试计数显示门铃写入。",
+          "evidence": "BAR 已映射\n尚无设备完成记录",
+          "q": "当前检查验证了哪条路径？",
+          "options": [
+            "设备 DMA 已成功",
+            "CPU 到控制器 MMIO 的路径有进展",
+            "MSI 已正确送达"
+          ],
+          "answer": 1,
+          "hint": "门铃写由 CPU 发起。",
+          "why": "门铃属于控制寄存器访问，DMA 与 IRQ 仍要各自检查。",
+          "next": "下一步查队列及 DMA 映射错误。"
+        },
+        {
+          "id": "pcie-w47-04-m",
+          "node": "pci",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "选取中断计数的对照",
+          "scene": "你怀疑 MSI 没送达。",
+          "evidence": "已找到对应 IRQ\n当前只看了一次空闲计数",
+          "q": "如何增加判断力？",
+          "options": [
+            "按同一负载对比前后计数并确认驱动模式",
+            "换一个随机 IRQ 看",
+            "检查 UEFI BootOrder"
+          ],
+          "answer": 0,
+          "hint": "计数要有时间差和真实请求。",
+          "why": "两次同源计数加已知触发更能说明通路状态。",
+          "next": "在测试记录上注明 IRQ 号和负载。"
+        },
+        {
+          "id": "pcie-w47-04-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "优先追到 DMA fault",
+          "scene": "设备队列一直超时。",
+          "evidence": "门铃动作已记录\n日志同时出现该 BDF 的 IOMMU translation fault",
+          "q": "优先核对什么？",
+          "options": [
+            "扩大 PCI ECAM",
+            "重建 UEFI 启动记录",
+            "设备 DMA 地址和该设备的 IOMMU 映射"
+          ],
+          "answer": 2,
+          "hint": "故障类型已经指向一次地址翻译。",
+          "why": "映射失败可能阻止设备读写队列，完成和中断自然可能缺失。",
+          "next": "确认 fault 地址、权限及 DMA 映射生命周期。"
+        }
+      ],
+      "reference": {
+        "title": "Linux MSI 指南",
+        "body": "对照向量申请、设备支持和平台限制。把日志中“支持”“启用”“触发”记成三列。",
+        "url": "https://docs.kernel.org/PCI/msi-howto.html"
+      }
+    },
+    {
+      "id": "pcie-w47-05",
+      "title": "看懂 PCIe 实际速率、宽度和吞吐",
+      "layer": "性能验收 · PCIe 链路 · Linux",
+      "goal": "用同一条链路两端和完整上游路径判定降速，再用可复现负载测吞吐。",
+      "sections": [
+        {
+          "title": "先把单位记正确",
+          "body": "lspci -tv 给出 PCI 树。按树定位端点与相邻上游端口，用 lspci -vv -s <BDF> 对比 LnkCap 能力与 LnkSta 当前状态。要留确信息的是速率 GT/s 与宽度 xN。GT/s 是每秒传输次数；xN 是并行链路通道数。两端能力都足够，也可能受插槽实际布线、上游共享或平台策略影响。设备或桥未暴露该能力字段时标为待取证。虚拟机的链接信息依赖模拟，不能据此验收实机物理链路。"
+        },
+        {
+          "title": "用数字感受边界",
+          "body": "例如 PCIe 4.0 的 16 GT/s 链路，x4 经过 128b/130b 编码后，每方向约 7.88 GB/s，仍要扣除包开销和上层开销。看到 8 GT/s x4 时，这段链路的对应上限约减半。实际吞吐还受设备介质、驱动队列深度、传输大小和 CPU 影响。先在空闲与负载期间分别记速率、宽度、有无重训和 AER 错误变化，再记录负载参数。若测存储，采用获准测试盘和只读基线，避免覆盖数据。"
+        },
+        {
+          "title": "从局部链路回查实际瓶颈",
+          "body": "假设端点已协商 16 GT/s x4，吞吐只有 3 GB/s。别只看目标设备的数字。沿树向上看交换机上行链路和同一路径的其他负载，验证是否共享瓶颈。再确认是否测到了缓存、是否写错块大小或测试对象，最后看设备健康、温度及 AER 等新证据。如果端点和相邻端口在高负载下都报告 8 GT/s x4，就把协商偏低当作已观测事实，并去核对平台规定目标和链路状态。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "暂停手算一次：对照 16 GT/s x4，把 16 降为 8 而保持 x4，求编码后上限的比例。然后把问题换成宽度从 x4 变 x2，速率保持不变。两者都减半，但可能对应不同的槽位、布线和协商问题。做记录时不要只写「带宽降了一半」，要同时记录速率与宽度，以便下班前交给别人继续排查。\n\n给结果保留一个实际的对照，比如同一张卡换到平台已经通过验收的槽位，或者在同一槽位使用已知正常的同型号卡。每次只换一件东西。记录原有和新的速率、宽度、压力参数以及新增错误，才能区分是槽位路径、设备本身还是负载差异。单次测速截图只适合做初始记录。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-05-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "读当前协商",
+          "scene": "端点暴露链接能力和状态。",
+          "evidence": "LnkCap: Speed 16GT/s, Width x4\nLnkSta: Speed 8GT/s, Width x4",
+          "q": "当前实际协商值是什么？",
+          "options": [
+            "16 GT/s x4",
+            "8 GB/s x4",
+            "8 GT/s x4"
+          ],
+          "answer": 2,
+          "hint": "Cap 是能力，Sta 是状态。",
+          "why": "实际速率是 8 GT/s，宽度为 x4。",
+          "next": "到相邻上游端口抓同一字段。"
+        },
+        {
+          "id": "pcie-w47-05-m",
+          "node": "pci",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "找全路径瓶颈",
+          "scene": "端点相邻链路达到预期。",
+          "evidence": "端点 16 GT/s x4\n交换机上行 8 GT/s x4\n同个上行还有第二张卡",
+          "q": "下一步对吞吐做什么对照？",
+          "options": [
+            "只重复 lspci -tv",
+            "单设备和双设备分别测，核对共享上行",
+            "换一个文件名重新读"
+          ],
+          "answer": 1,
+          "hint": "端点和上行是两条链路。",
+          "why": "单卡和双卡负载差异能检验共享上行是否受限。",
+          "next": "记录两组负载参数和链路信息。"
+        },
+        {
+          "id": "pcie-w47-05-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "区分带宽与可靠性",
+          "scene": "压力期间吞吐有周期性跌落。",
+          "evidence": "空闲与负载两端状态发生变化\n同时 AER 计数增加",
+          "q": "哪组补充证据最能帮助定位？",
+          "options": [
+            "记录重训/链路状态时间点、AER 增量并对照压力阶段",
+            "只统计最大带宽",
+            "仅确认厂商宣传速率"
+          ],
+          "answer": 0,
+          "hint": "寻找波动是否在同一时间发生。",
+          "why": "时间对齐可以检验链路变化与吞吐跌落是否相关，因果仍需对照。",
+          "next": "择一更换槽位或一张已知正常的卡做受控对比。"
+        }
+      ],
+      "reference": {
+        "title": "Linux PCI sysfs ABI",
+        "body": "查当前链路速率和宽度相关属性，配合 lspci 状态采集。字段可用性以实际内核和设备为准。",
+        "url": "https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-bus-pci"
+      }
+    },
+    {
+      "id": "pcie-w47-06",
+      "title": "同一块 NVMe 的 UEFI 和 Linux 证据",
+      "layer": "UEFI · 启动项 · Linux NVMe",
+      "goal": "区分控制器、命名空间、启动分区和 EFI 文件，找出启动缺口。",
+      "sections": [
+        {
+          "title": "把四个对象连起来",
+          "body": "NVMe 控制器出现在 PCI 树里，只能证明配置空间能发现该功能。固件要进一步驱动控制器，发现并暴露可访问的命名空间，再识别分区和可读的文件系统。正常的 UEFI 启动项通常有一个设备路径，定位分区及目标 EFI 文件。启动管理器还根据 BootOrder、BootNext、启动项属性和平台策略决定启动顺序。每个对象写一条现场证据，看到控制器不能替代看到命名空间，看到分区也不能替代打开目标 EFI 文件。"
+        },
+        {
+          "title": "从 Shell 与 Linux 交叉验证",
+          "body": "有 UEFI Shell 时，用 map -r 刷新映射，找到实际对应的 fsN:，再核对文件；这个编号可能在换设备或启动后变化。在 Linux 从 UEFI 模式启动的情况下，可以用 efibootmgr -v 读 Boot#### 及其设备路径，用 lsblk -o NAME,TYPE,PARTUUID,FSTYPE,MOUNTPOINTS 对准目标分区。用 nvme list 与 nvme list-ns /dev/nvme0 核对设备对象。记录和比较查询结果，先别改 BootOrder 或格式化分区。"
+        },
+        {
+          "title": "模拟一次换盘后的老启动项",
+          "body": "原盘 A 克隆到 B 后，Linux 能看到 B，UEFI 的 Boot0007 还引用 A 的分区标识。新盘上虽有同名 EFI 文件，旧启动项仍可能指向旧分区；若克隆保留了相同的分区标识，还要排除双盘同时在线带来的歧义。先核对当前启用的启动项、实际分区和目标文件三项。若设备路径对、文件存在但启动仍失败，再查镜像架构、读取权限和 Secure Boot 验证等证据。用 efibootmgr -v 的路径和目录两行定位，避免把路径失配说成控制器故障。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "闭眼想象有四张卡片，依次写控制器、命名空间、EFI 系统分区、EFI 文件。给每张卡片添一条能在现场观察的证据，再给 Boot#### 画一条指向后两张卡的线。如果固件能读到文件、加载时才报签名错误，把前三张卡标为已通过，把问题写在加载和验证阶段。\n\n做重复验证时用同一个目标分区核对 Linux 和固件视角。如果工具显示两个相同的名称，先看设备路径、分区 GUID 和物理位置，避免选中错误的盘。公司固件未开放 Shell 时，保留串口中驱动绑定、分区发现和镜像加载的日志，并注明哪一条来自固件，哪一条来自 Linux。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-06-e",
+          "node": "uefi-storage",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "确认命名空间",
+          "scene": "固件日志看到 NVMe PCI 控制器。",
+          "evidence": "有 Vendor ID 和 Device ID\n无命名空间证据",
+          "q": "接下来最需要补哪条？",
+          "options": [
+            "固件是否识别并暴露命名空间的块设备",
+            "BootOrder 已按预期排序",
+            "Linux 的中断计数"
+          ],
+          "answer": 0,
+          "hint": "先证明有可读的存储对象。",
+          "why": "PCI 控制器是硬件功能，命名空间才是后续分区访问的基础。",
+          "next": "在固件环境检查设备和文件系统映射。"
+        },
+        {
+          "id": "pcie-w47-06-m",
+          "node": "uefi-boot",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "辨认启动项指向",
+          "scene": "Linux 可见新盘和新盘 ESP。",
+          "evidence": "Boot0007 的分区标识属于旧盘\n新盘有同名 EFI 文件",
+          "q": "最直接的故障是什么？",
+          "options": [
+            "NVMe 链路没有建立",
+            "固件仍按旧设备路径找目标",
+            "新盘必然无法读取"
+          ],
+          "answer": 1,
+          "hint": "同名文件也需要先定位到正确分区。",
+          "why": "启动项的设备路径仍指向旧盘。",
+          "next": "对照 Boot0007、PARTUUID 和 EFI 目录。"
+        },
+        {
+          "id": "pcie-w47-06-h",
+          "node": "uefi-boot",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "控制路径和文件都正确",
+          "scene": "启动项路径与 ESP 一致，EFI 文件可读。",
+          "evidence": "命名空间可用\n启动 EFI 文件时报告验证失败",
+          "q": "下一步最有区分力的检查？",
+          "options": [
+            "扩大 BAR",
+            "调整 NVMe 队列深度",
+            "核对 EFI 架构及 Secure Boot 验证日志"
+          ],
+          "answer": 2,
+          "hint": "读文件成功，失败是在装载或验证。",
+          "why": "检查镜像属性和具体验证结果能继续定位加载阶段。",
+          "next": "保留固件错误、EFI 文件身份和策略状态。"
+        }
+      ],
+      "reference": {
+        "title": "EDK II 的 UEFI Boot Manager 源码",
+        "body": "在 BmBoot.c 找 EfiBootManagerBoot，再沿设备路径和加载镜像代码核对启动项到底交给谁。",
+        "url": "https://raw.githubusercontent.com/tianocore/edk2/master/MdeModulePkg/Library/UefiBootManagerLib/BmBoot.c"
+      }
+    },
+    {
+      "id": "pcie-w47-07",
+      "title": "USB 和 RAID：控制器出现之后查什么",
+      "layer": "Linux · USB 拓扑 · RAID 逻辑卷",
+      "goal": "识别控制器后的第二次枚举，给 USB 和 RAID 各写一条可验收证据链。",
+      "sections": [
+        {
+          "title": "USB 设备树和 PCI 树要分别记录",
+          "body": "服务器上的 USB 控制器常用 PCI xHCI，能在 lspci 看到控制器仍需核对驱动及端口。连接 U 盘后用 lsusb -t 看 USB 拓扑、速率和接口驱动，观察内核日志中的插拔、地址分配或描述符读取。USB 设备出现后，存储接口再可能交给 uas 或 usb-storage，随后暴露 SCSI 盘和块设备。若控制器已绑定 xhci 但插设备没有任何事件，先查 USB 端口、供电和连接路径。"
+        },
+        {
+          "title": "硬件 RAID 卡也有两层对象",
+          "body": "Linux 扫描 PCI 发现 RAID 控制器，驱动初始化后还要看控制器是否向 OS 发布逻辑卷或直通磁盘。控制器是否能看见物理盘，要用支持该型号的厂商工具或者固件管理界面只读核对。Linux 用 lsscsi 和 lsblk 看已发表的设备。常见现场是控制器与物理盘都存在，但没有配置或导出预期卷。先确认 HBA、JBOD 或 RAID 模式及已有卷，再比较 OS 所见，切换模式和新建阵列涉及设备现有数据。"
+        },
+        {
+          "title": "用管理面作交叉取证",
+          "body": "openUBMC 或其他 BMC 可能通过平台采集或带外通路维护 FRU、控制器和磁盘信息。对照同一槽位、序列号和采集时间，记录 BMC、固件、Linux 各能看到哪一层。管理面列出物理盘仍需独立核对 OS 中是否出现预期逻辑设备。周记里把 USB 和 RAID 分别写成「控制器绑定—子设备—功能对象」。两条路径共享 PCI 基础，第二次枚举的命令和证据不同。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "为 USB 和 RAID 各写三行，控制器、下一层总线或控制器对象、OS 功能对象。给 USB 添上是否读到描述符和存储接口是否匹配，给 RAID 添上是否存在已导出的逻辑卷。最后给 BMC 所见单独留一栏，填观察日期和槽位，想想带外库存为什么可以作为线索但还需核对主机现场。\n\n确认 USB 降速可以在同一个端口和同一台机器上，用已知支持更高速率的线缆或 U 盘做对照。确认 RAID 时只读取厂商工具的状态和当前卷信息。两种实验的对照对象不同，但都需要记录设备身份和动作时间。这样做能避免把前一天 BMC 的库存或拔掉前的日志当作当前状态。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-07-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "选择 USB 的下游视角",
+          "scene": "已经看到 PCI 上的 xHCI 控制器。",
+          "evidence": "U 盘已插入\n需要看 USB 设备及接口驱动",
+          "q": "哪条命令最直接？",
+          "options": [
+            "lsblk -f",
+            "efibootmgr -v",
+            "lsusb -t"
+          ],
+          "answer": 2,
+          "hint": "要看的是 USB 自己的总线拓扑。",
+          "why": "lsusb -t 展示 USB 拓扑、速率和接口绑定情况。",
+          "next": "再用日志和 lsblk 看块设备是否生成。"
+        },
+        {
+          "id": "pcie-w47-07-m",
+          "node": "block",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "追踪 RAID 逻辑卷",
+          "scene": "BMC 能看到两块物理盘。",
+          "evidence": "PCI RAID 控制器驱动已绑定\nLinux 无目标逻辑卷",
+          "q": "先查哪组证据？",
+          "options": [
+            "控制器模式、已有逻辑卷及导出状态",
+            "PCI 配置空间窗口能否读取",
+            "UEFI 是不是用了 BootNext"
+          ],
+          "answer": 0,
+          "hint": "有物理盘和有 OS 可见卷分属不同层。",
+          "why": "需要确认控制器实际向主机暴露哪些对象。",
+          "next": "只读核对厂商工具和 OS 设备清单。"
+        },
+        {
+          "id": "pcie-w47-07-h",
+          "node": "block",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "验证 USB 存储完整路径",
+          "scene": "xHCI 已绑定，USB 拓扑里也出现了 U 盘。",
+          "evidence": "对应接口没有存储驱动\nlsblk 无该设备",
+          "q": "最有区分力的下一步？",
+          "options": [
+            "先认定 xHCI 没枚举",
+            "核对接口类、uas/usb-storage 匹配和内核日志",
+            "调整 UEFI 启动顺序"
+          ],
+          "answer": 1,
+          "hint": "USB 子设备已经出现，缺的是接口到功能对象。",
+          "why": "接口匹配和存储驱动日志位于当前断点。",
+          "next": "先抓日志，再针对当前内核配置做比较。"
+        }
+      ],
+      "reference": {
+        "title": "openUBMC 官方版本记录",
+        "body": "按实际平台版本找库存或管理面相关条目。遇到新问题时，带外库存和 Linux 设备清单需要分别核对。",
+        "url": "https://www.openubmc.cn/zh/version/26.06"
+      }
+    },
+    {
+      "id": "pcie-w47-08",
+      "title": "周末验收：从识别成功到性能结论",
+      "layer": "实战 · RISC-V/UEFI/Linux 完整证据",
+      "goal": "独立填写一张三设备验收单，按最后成功阶段定位一次混合故障。",
+      "sections": [
+        {
+          "title": "先选定实验对象和边界",
+          "body": "在 QEMU virt 上可以先复验主桥、拓扑及 OS 枚举链。选择本地支持的 NVMe 与 xHCI 设备模型，用虚拟磁盘和 USB 存储走通流程，查 QEMU 当前机器和设备参数。真实硬 RAID 和物理 PCIe 性能放到实体平台验收，按目标硬件清单记录，先确认被测卡、槽位、固件版本、OS 和内核版本。把「支持这个架构和系统镜像」与「该设备通过识别和压力验收」写成独立条目。"
+        },
+        {
+          "title": "四个列项足够开局",
+          "body": "对 USB、NVMe 和 RAID 分别填四列：拓扑、资源与驱动、功能对象、性能。拓扑记录域/总线与端点的 lspci -Dtv 路径；资源与驱动记 lspci -vv -nnk 或对应 sysfs；功能对象记 lsusb -t、NVMe namespace 或 RAID 逻辑卷；性能记同一物理路径上目标与实测的速率/宽度，加已知工作负载、吞吐和错误增量。区分通过、失败和未测。如果一个字段采不到，写下缺的证据而不要填猜测值。"
+        },
+        {
+          "title": "用一组混合日志收尾",
+          "body": "假设新版本上 NVMe 端点已挂在 PCI 树里，但没有 namespace；USB 控制器在 PCI 树里，下游 U 盘速度只到 480 Mb/s；带外管理面能见 RAID 卡所接物理盘，OS 的 RAID 功能却缺席。你的单子应指向三条不同的下一步：NVMe 查控制器初始化和对象；USB 查该端口、线缆、USB 设备能力及实际枚举速率；RAID 先查目标 PCI BDF 是否出现及槽位链路、配置访问。分别给三个现象写「最后成功点＋待验证假设＋一个足以改变判断的证据」。"
+        },
+        {
+          "title": "停一下，自己画证据链",
+          "body": "用纸或笔记复制三行模板：设备与槽位、最后成功点、下一条证据。每行只允许选一条下一步。完成后给自己两分钟做反证：如果获取的这条证据与预期相反，我会把问题移到哪一层？如果没有一条证据能改变当前结论，说明下一步还需要换成更有区分力的检查。\n\n最后把三种结论交给别人复查。第一种给足证据并标为通过，第二种明确断点和下一条检查，第三种明确还未在实机验证。有了这一页记录，软件、BIOS 或整机团队就能各自接走负责的环节。检查一下你的表里是否有「PCIe 正常」这样的宽泛结论，将它改成已确实测到的速率、宽度、对象或吞吐。"
+        }
+      ],
+      "questions": [
+        {
+          "id": "pcie-w47-08-e",
+          "node": "pci",
+          "section": 0,
+          "kind": "training",
+          "prereq": [],
+          "title": "选择拓扑基线",
+          "scene": "你要比较同一台机器升级前后。",
+          "evidence": "三类端点都要按上游路径核对\n机器可能有多个 PCI 域",
+          "q": "最适合作首张快照的是？",
+          "options": [
+            "lsblk",
+            "lspci -Dtv",
+            "efibootmgr -v"
+          ],
+          "answer": 1,
+          "hint": "需要带域的 PCI 树。",
+          "why": "树结构能将端点与其上游路径联系起来。",
+          "next": "同时留完整 BDF 表和硬件槽位映射。"
+        },
+        {
+          "id": "pcie-w47-08-m",
+          "node": "block",
+          "section": 1,
+          "kind": "training",
+          "prereq": [],
+          "title": "找到 NVMe 的最后已知点",
+          "scene": "新固件下控制器出现在 lspci，驱动也已绑定。",
+          "evidence": "没有块设备\n无已确认的 namespace",
+          "q": "现场如何记录？",
+          "options": [
+            "整条链路均通过",
+            "PCI 枚举失败",
+            "PCI 已枚举并绑定，功能对象待排查"
+          ],
+          "answer": 2,
+          "hint": "验收要保留每一步已经成立的结论。",
+          "why": "控制器出现和绑定成功都不足以证明命名空间已可用。",
+          "next": "检查 nvme list-ns 和控制器日志。"
+        },
+        {
+          "id": "pcie-w47-08-h",
+          "node": "pci",
+          "section": 2,
+          "kind": "training",
+          "prereq": [],
+          "title": "找出最先回到 PCI 层的设备",
+          "scene": "升级后检查三类设备。",
+          "evidence": "NVMe 端点存在但无 namespace\nUSB 存储已出现但只协商到 480 Mb/s\nBMC 有盘记录，Linux 找不到 RAID 卡 PCI 功能",
+          "q": "哪一项应最先从槽位链路或配置访问查起？",
+          "options": [
+            "RAID 卡 PCI 功能缺失",
+            "USB 存储协商速度偏低",
+            "NVMe namespace 缺失"
+          ],
+          "answer": 0,
+          "hint": "先找最早缺失的必要阶段。",
+          "why": "BMC 的库存不能证明 Linux 已经读到 RAID 卡的 PCI 配置空间。",
+          "next": "用相同槽位及旧固件快照对照链路和配置读。"
+        }
+      ],
+      "reference": {
+        "title": "龙蜥 RISC-V SIG 官方主页",
+        "body": "用官方页面追踪软件栈、镜像和维护项目。拿到发行版版本后，还要逐条找目标卡型号、内核驱动和实际验收证据。",
+        "url": "https://openanolis.cn/sig/RISCV"
+      }
     }
   ],
   "cases": [
